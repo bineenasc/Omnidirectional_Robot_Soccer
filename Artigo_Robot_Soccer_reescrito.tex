@@ -1,0 +1,567 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{float}
+\usepackage{comment}
+\usepackage{graphicx}
+\usepackage{pdflscape}
+\usepackage{siunitx}
+\usepackage{textcomp}
+\usepackage{rotating}
+\usepackage{xcolor}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+% =============================================================================
+%  GUIA DE FIGURAS - usa APENAS as 4 imagens anexadas. Salve cada uma em imgs/:
+%   Fig.1  imgs/field.png            -> campo top-view (TITAN vs VIPER + bola)
+%   Fig.2  imgs/objs_scale.png       -> comparacao Viper, Titan e bola
+%   Fig.3  imgs/monitor_training.png -> monitor de treino (Viper topo / Titan base):
+%                                       recompensa + duracao do episodio por passos
+%   Fig.4  imgs/learning_curve.png   -> curva por episodio / eficiencia / taxa de gol
+%                                       (PROVA do reward hacking)
+% =============================================================================
+
+\begin{document}
+\title{Deep Reinforcement Learning for Competitive 1v1 Robot Soccer Using
+Heterogeneous Three-Wheel Omni-Directional Robots}
+
+\author{\IEEEauthorblockN{Daniela Osório}
+\IEEEauthorblockA{\textit{Faculty of Engineering,} \\
+\textit{University of Porto} \\
+Porto, Portugal \\
+up202208679@up.pt}
+\and
+\IEEEauthorblockN{Diego Ferreira}
+\IEEEauthorblockA{\textit{Faculty of Engineering,} \\
+\textit{University of Porto} \\
+Porto, Portugal \\
+up202205295@up.pt}
+\and
+\IEEEauthorblockN{Marcella Andrade}
+\IEEEauthorblockA{\textit{Faculty of Engineering,} \\
+\textit{University of Porto} \\
+São Paulo, Brasil \\
+up2025121342@up.pt}
+\and
+\IEEEauthorblockN{Pabline Nascimento}
+\IEEEauthorblockA{\textit{Faculty of Engineering,} \\
+\textit{University of Porto} \\
+Divinópolis, Brasil \\
+up202512028@up.pt}
+}
+\maketitle
+
+% -------- %
+% ABSTRACT %
+% -------- %
+\begin{abstract}
+This paper investigates the use of Deep Reinforcement Learning (DRL) for
+autonomous robot soccer in a one-versus-one scenario involving heterogeneous
+omni-directional mobile robots. Two platforms, Titan and Viper, differing in
+size, wheel geometry, and maximum velocity, were trained with Proximal Policy
+Optimization (PPO) in a Webots~R2025a environment integrated with Gymnasium and
+Stable-Baselines3. A single morphology-conditioned policy controls both robots,
+operating on a privileged state representation expressed entirely in the robot's
+local reference frame, with the three-wheel omni-directional inverse kinematics
+embedded in the low-level controller. Training follows a two-stage Curriculum
+Learning (CL) strategy: a foundational single-agent stage (1v0) for locomotion,
+ball approach and shooting, followed by an adversarial stage (1v1) that
+fine-tunes the policy against an opponent. We report results honestly: the agent
+reliably reaches and scores from short and medium range, but a competency-based
+analysis exposes a finishing limitation — the deterministic policy converges to a
+reward-shaping local optimum in which it parks near a goal post and stalls instead
+of completing the shot, yielding a 1v0 goal rate of 37.5\% (with no own-goals or
+out-of-bounds) and draws in 1v1. We analyse this behaviour, quantify it, and
+identify the reward-balance and training-budget changes required to overcome it.
+The study also shows that a robot-local observation design generalises across
+platforms with different mass, geometry and speed.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Robot Soccer, Deep Reinforcement Learning, Proximal Policy Optimization,
+Curriculum Learning, Heterogeneous Robots, Omni-Directional Robots,
+Autonomous Agents
+\end{IEEEkeywords}
+
+% ----- %
+% PAPER %
+% ----- %
+\section{Introduction}
+Robot soccer is a well-established benchmark problem in autonomous robotics and
+artificial intelligence, as it integrates navigation, manipulation,
+decision-making, and adversarial interaction in a dynamic and partially
+competitive environment. Learning effective soccer behaviour is particularly
+challenging, as it requires agents to jointly acquire locomotion control and ball
+manipulation skills while adapting to the presence of an opposing player.
+
+Recent advances in Deep Reinforcement Learning (DRL) have enabled the acquisition
+of complex control policies through interaction with simulated environments. In
+this work, Proximal Policy Optimization (PPO) and Curriculum Learning (CL) are
+employed to train two heterogeneous three-wheel omni-directional robots, Titan and
+Viper, in a one-versus-one soccer scenario. The two platforms differ in physical
+dimensions and dynamic capabilities, resulting in asymmetric conditions that
+necessitate adaptive policy learning. A distinctive aspect of our setup is that a
+single PPO policy controls both robots: morphology is encoded as an observation
+feature rather than learned by separate models.
+
+The objective of this study is to evaluate the capability of DRL methods to learn
+effective behaviours for navigation, ball control, and goal scoring in a
+competitive setting, and to characterise the failure modes that arise from dense
+reward shaping under a limited training budget. The remainder of this paper is
+organised as follows: Section~\ref{sec:related} presents related work,
+Section~\ref{sec:method} describes the methodology, Section~\ref{sec:setup}
+details the experimental setup, Section~\ref{sec:results} discusses the results,
+and Section~\ref{sec:conclusion} concludes the paper and outlines future work.
+
+\section{Related Work} \label{sec:related}
+\subsection{Robot Soccer Competitions}
+Robot soccer has long served as a benchmark for autonomous robotics because it
+combines perception, motion control, decision making, and adversarial interaction
+within a single task. Since the introduction of RoboCup, the field has become one
+of the most established research platforms for evaluating intelligent robotic
+systems~\cite{kitano1998robocup}. RoboCup has expanded into multiple leagues,
+including the Small Size League, Humanoid League, and Standard Platform League,
+each emphasising different challenges such as high-speed multi-robot coordination,
+humanoid locomotion, and software-focused competition under standardised hardware.
+In contrast to settings that emphasise homogeneous teams or multi-agent
+cooperation, this work focuses on a simplified one-versus-one scenario using
+heterogeneous omni-directional robots, allowing the influence of robot morphology
+on learned behaviour to be investigated.
+
+\subsection{Reinforcement Learning in Robot Soccer}
+Reinforcement Learning (RL) has been widely investigated as a means of enabling
+robots to acquire soccer skills directly through interaction with the environment.
+Early work such as the RoboCup Keepaway task demonstrated that RL could learn
+cooperative behaviours in multi-agent settings~\cite{stone2005keepaway}. More
+recently, advances in DRL and simulation frameworks such as rSoccer have enabled
+increasingly complex tasks under standardised conditions~\cite{martins2021rsoccer}.
+Large-scale studies have shown that DRL can learn agile locomotion, ball handling,
+and strategic behaviours for humanoid robots, including policies that transfer to
+physical platforms~\cite{haarnoja2023agilesoccer, tirumala2024visionsoccer}. While
+these works focus on humanoid locomotion or homogeneous agents, the present work
+investigates whether a single PPO policy can adapt to two heterogeneous
+omni-directional robots with distinct physical characteristics.
+
+\subsection{Curriculum Learning in Robotics}
+Curriculum Learning was introduced as a strategy for improving learning by
+presenting tasks in order of increasing difficulty~\cite{bengio2009curriculum}. In
+robotic RL, curriculum-based training improves convergence and facilitates the
+acquisition of behaviours that are difficult to learn from sparse rewards alone.
+Robot soccer naturally benefits from this approach because successful play requires
+the sequential acquisition of navigation, ball manipulation, and opponent
+interaction. Following this principle, our methodology separates training into a
+foundational 1v0 stage and a competitive 1v1 stage.
+
+\section{Methodology} \label{sec:method}
+\subsection{Simulation Environment}
+All experiments were conducted in Webots~R2025a, an open-source robot simulator
+that provides physics-based rigid body dynamics, sensor simulation, and a Python
+API. The training loop was implemented using the Gymnasium interface, with
+Stable-Baselines3 providing the PPO implementation. The supervisor controller is a
+privileged Webots process with omniscient access to all node positions; it serves
+as the Gymnasium environment, driving the simulation step by step and exposing the
+RL interface.
+
+The field was modelled as a scaled-down rectangular pitch (scaling factor 0.65
+relative to standard dimensions) measuring $7.4 \times 10.4\,\mathrm{m}$, using the
+Webots NUE coordinate convention (X east, Y up, Z south). Two 1.5\,m-wide goals
+were positioned at opposite ends along the Z-axis ($z = \pm 4.55\,\mathrm{m}$). A
+spherical ball (radius 0.025\,m, mass 0.055\,kg) with realistic friction and
+restitution was placed as a dynamic rigid body. The complete setup is shown in
+Fig.~\ref{fig:field_scale}. Each simulation step corresponds to 5 Webots basic
+timesteps of 8\,ms, yielding a 40\,ms control period (25\,Hz). Training ran in
+\texttt{SIMULATION\_MODE\_FAST}, decoupled from real time, to maximise throughput.
+An episode terminates when (i)~the ball enters a goal, (ii)~the ball leaves the
+field, or (iii)~the maximum number of simulation steps is reached.
+
+\begin{table}[h]
+    \centering
+    \caption{Simulation environment parameters.}
+    \label{tab:environment}
+    \begin{tabular}{lc}
+        \hline
+        \textbf{Parameter} & \textbf{Value} \\
+        \hline
+        Field dimensions   & $7.4 \times 10.4$ m \\
+        Coordinate system  & Webots NUE \\
+        Goal width         & 1.5 m \\
+        Ball radius        & 0.025 m \\
+        Control period     & 40 ms (25 Hz) \\
+        Physics timestep   & 8 ms \\
+        \hline
+    \end{tabular}
+\end{table}
+
+% FIG.1 - imagem anexada: campo top-view
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/field.png}
+    \caption{Omnidirectional robot soccer 1v1 field: Viper (red) and Titan (blue)
+    with the ball at the centre; goals at opposite ends along the Z-axis.}
+    \label{fig:field_scale}
+\end{figure}
+
+\subsection{Robot Models}
+Two holonomic platforms were used: Viper and Titan, both implemented as Webots
+PROTO nodes with omnidirectional drive. They share the same sensor suite
+(1440-ray LiDAR, IMU, GPS) but differ in physical parameters, as illustrated in
+Fig.~\ref{fig:robot_scale} and summarised in Table~\ref{tab:robots}. Viper is
+smaller and faster; Titan is larger and more robust.
+
+\begin{table}[h]
+    \centering
+    \caption{Physical and sensor parameters of the two robot platforms.}
+    \label{tab:robots}
+    \begin{tabular}{lcc}
+        \hline
+        \textbf{Parameter} & \textbf{Viper} & \textbf{Titan} \\
+        \hline
+        Colour & \textcolor{red}{Red} & \textcolor{blue}{Blue} \\
+        Wheel radius (m) & 0.030 & 0.035 \\
+        Wheel distance (m) & 0.138 & 0.170 \\
+        Max wheel velocity (rad/s) & 15.0 & 9.0 \\
+        Approx. top speed (m/s) & 0.45 & 0.315 \\
+        Body radius (m) & 0.120 & 0.165 \\
+        LiDAR rays & 1440 & 1440 \\
+        LiDAR max range (m) & 3.50 & 3.50 \\
+        \hline
+    \end{tabular}
+\end{table}
+
+% FIG.2 - imagem anexada: comparacao de tamanho
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/objs_scale.png}
+    \caption{Viper (red), Titan (blue), and ball size comparison.}
+    \label{fig:robot_scale}
+\end{figure}
+
+\subsection{Three-Wheel Omnidirectional Inverse Kinematics}
+Each robot is driven by three omnidirectional wheels placed at angular offsets
+$\varphi_1 = 0^\circ$, $\varphi_2 = 120^\circ$, $\varphi_3 = 240^\circ$ relative to
+the forward axis ($+x$ in body frame). Let $v_x$ and $v_z$ denote forward and
+lateral translational velocities (m/s) and $\omega$ the yaw rate (rad/s). The
+inverse-kinematics mapping from body velocities to wheel angular speeds
+$[\omega_1,\omega_2,\omega_3]^\top$ is
+\begin{equation}
+\begin{bmatrix} \omega_1 \\ \omega_2 \\ \omega_3 \end{bmatrix}
+= \frac{1}{R}
+\begin{bmatrix}
+1 & 0 & L \\
+-\sin 30^\circ & \cos 30^\circ & L \\
+-\sin 30^\circ & -\cos 30^\circ & L
+\end{bmatrix}
+\begin{bmatrix} v_x \\ v_z \\ \omega \end{bmatrix},
+\end{equation}
+where $R$ is the wheel radius and $L$ the centre-to-wheel distance. Embedding the
+inverse kinematics in the low-level controller decouples the policy from
+wheel-level actuation, so the network outputs intuitive Cartesian body velocities
+and each wheel speed is clamped to the robot-specific maximum before application.
+
+\subsection{Observation Space}
+The policy operates on a privileged state representation provided by the supervisor,
+without direct access to raw sensor measurements. During the 1v0 stage the
+observation vector contains 24 dimensions; in the 1v1 stage six additional
+opponent-related features are included, yielding 30 dimensions. The complete space
+is summarised in Table~\ref{tab:obs}; features 24--29 are present only in 1v1.
+
+The robot yaw $\theta$ is extracted from the orientation matrix as
+$\theta = \operatorname{atan2}(-m_1, m_0)$, where $m_0$ and $m_1$ are elements of
+the matrix. World-frame direction vectors are transformed into the robot's local
+frame by
+\begin{equation}
+\mathbf{u}_l =
+\begin{bmatrix}
+\cos\theta & \sin\theta \\
+-\sin\theta & \cos\theta
+\end{bmatrix}
+\mathbf{u}_w ,
+\end{equation}
+where $\mathbf{u}_w = (d_x, d_z)$ is a world-frame unit direction and
+$\mathbf{u}_l$ its local-frame representation. Consequently positive local-frame
+$z$-values indicate that the target lies in front of the robot, so the policy maps
+$d_z^l > 0 \Rightarrow v_z > 0$ without learning an implicit coordinate rotation.
+
+\begin{table}[t]
+    \centering
+    \caption{Observation features. Features 24--29 are omitted in 1v0; distances
+    are normalised and directions are robot-relative.}
+    \label{tab:obs}
+    \begin{tabular}{c l c}
+        \hline
+        \textbf{Index} & \textbf{Feature} & \textbf{Range} \\
+        \hline
+        0      & Robot type ID                                  & $\{0,1\}$ \\
+        1      & Distance to ball                               & $[0,1]$ \\
+        2--3   & Direction to ball $(x,z)$                      & $[-1,1]^2$ \\
+        4      & Distance to attack goal centre                 & $[0,1]$ \\
+        5--6   & Direction to attack goal centre $(x,z)$        & $[-1,1]^2$ \\
+        7--9   & Attack right post: distance, direction         & $[0,1]\times[-1,1]^2$ \\
+        10--12 & Attack left post: distance, direction          & $[0,1]\times[-1,1]^2$ \\
+        13--15 & Own right post: distance, direction            & $[0,1]\times[-1,1]^2$ \\
+        16--18 & Own left post: distance, direction             & $[0,1]\times[-1,1]^2$ \\
+        19--21 & Robot velocity $(v_x,v_z,\omega)$              & $\mathbb{R}^3$ \\
+        22--23 & Ball velocity $(v_x,v_z)$                      & $\mathbb{R}^2$ \\
+        24     & Distance to opponent                           & $[0,1]$ \\
+        25--26 & Direction to opponent $(x,z)$                  & $[-1,1]^2$ \\
+        27--28 & Opponent velocity $(v_x,v_z)$                  & $\mathbb{R}^2$ \\
+        29     & Opponent blocking flag                         & $\{0,1\}$ \\
+        \hline
+    \end{tabular}
+\end{table}
+
+When no opponent is present, the opponent features take default values
+corresponding to maximum normalised distance and null direction/velocity.
+
+\subsection{Action Space}
+The policy outputs a continuous action $\mathbf{a} = [a_0, a_1, a_2] \in [-1,1]^3$
+mapped to velocity commands by
+\begin{equation}
+v_x = a_0\,v_{\max}, \quad v_z = a_1\,v_{\max}, \quad \omega = a_2\,\omega_{\max},
+\end{equation}
+with $v_{\max} = 0.5\,\mathrm{m/s}$ and $\omega_{\max} = 3.0\,\mathrm{rad/s}$. The
+commands are serialised, Base64-encoded, and transmitted to the robot controller
+over an IPC channel — Base64 ensures compatibility with the Webots~R2025a receiver
+interface, which decodes messages as UTF-8 strings. Producing all three components
+simultaneously enables full omnidirectional motion.
+
+\subsection{Reward Design}
+Two reward functions were designed: a simpler one for 1v0 and an extended version
+for 1v1. Both share the same dense shaping hierarchy and differ only in terminal
+signals and opponent-aware terms. The core shaping components are:
+\begin{itemize}
+    \item \textbf{Per-step time penalty:} $-0.003$.
+    \item \textbf{Robot-to-ball progress:} $+4.0 \cdot \Delta d_{\text{robot}\to\text{ball}}$.
+    \item \textbf{Ball-to-goal progress:} $+15.0 \cdot \max(0,\Delta d_{\text{ball}\to\text{goal}})$, clipped on backward motion to prevent ball avoidance.
+    \item \textbf{Ball velocity toward goal:} up to $\pm1.0$.
+    \item \textbf{Robot--ball--goal alignment:} $+0.3 \cdot \cos\theta$.
+    \item \textbf{Contact bonus:} $+0.25$ for directed touches ($+0.05$ otherwise), at most once every eight steps.
+    \item \textbf{Anti-stall penalties:} $-0.10$/step after 20 motionless steps; $-0.30$/step after 20 steps stuck against a post.
+\end{itemize}
+Terminal signals: in 1v0, $+300$ for a goal, $-200$ for an own goal, $-25$ for
+ball out of bounds. In 1v1, $+300$ for a goal, $-250$ when the opponent scores, and
+an opponent-proximity penalty of $-0.08$ when the robots are within $0.30\,\mathrm{m}$.
+
+\subsection{Curriculum Learning Strategy}
+Both stages employ a competency-based curriculum that adjusts spawn positions to
+progressively increase difficulty, avoiding the sparse-reward problem of fully
+random initialisation. In the \textbf{1v0} stage the curriculum defines eight
+phases (0--7): early phases place the ball within $0.20\,\mathrm{m}$ of the attack
+goal with the robot aligned behind it, and each subsequent phase increases the
+ball-to-goal distance until phase~7 spawns both entities uniformly across the
+field. The per-phase episode budget grows from 350 to 1250 steps.
+
+An initial promotion criterion (goal rate $\geq 50\%$ over 40 episodes) proved
+effectively unreachable beyond the trivial phases and stalled the curriculum; it
+was revised to $\geq 40\%$ over 30 episodes, complemented by a demotion rule (drop
+one phase below a $10\%$ goal rate) so the agent can re-consolidate. With this
+revision the curriculum reliably advances through the mid-distance phases.
+
+In the \textbf{1v1} stage the curriculum has four named phases
+(\textit{warmup}/\textit{phase1}/\textit{phase2}/\textit{phase3}). During warmup and
+phase1 the opponent is static; phase2 introduces a scripted opponent (go-to-ball,
+shoot at its own goal); phase3 uses a frozen snapshot of the opponent's policy,
+refreshed each epoch, with fully random spawns. The 1v1 policy is obtained from the
+1v0 policy by weight surgery: the input layer is extended from 24 to 30 dimensions,
+copying the existing weights and zero-initialising the six new opponent inputs.
+
+\subsection{PPO Training Setup} \label{sec:ppo_setup}
+All agents were trained using PPO~\cite{schulman2017ppo} from Stable-Baselines3. A
+shared MLP policy ($[256,256]$) was used for both platforms; rather than training
+separate networks, a single policy conditions on the \texttt{type\_id} feature.
+The final configuration uses $n_{\text{steps}} = 2048$, batch size $256$,
+$n_{\text{epochs}} = 10$, $\gamma = 0.99$, GAE $\lambda = 0.95$, clip range $0.2$,
+entropy coefficient $0.03$, and a linear learning-rate schedule from
+$3\times10^{-4}$ to $1\times10^{-5}$. Rewards are normalised online with
+\texttt{VecNormalize} (clip value 50, large enough to preserve the $+300$ goal
+signal). In the 1v0 stage, a single policy controls either robot via a hot-swap
+mechanism that replaces the physical node in the scene while keeping the DEF name
+constant; in the 1v1 stage, the active agent alternates between Viper and Titan
+across epochs, with the other robot acting as opponent.
+
+\section{Experimental Setup} \label{sec:setup}
+\subsection{Training Configuration}
+Table~\ref{tab:training_config} summarises the configuration of each stage.
+
+\begin{table}[h]
+    \centering
+    \caption{Training configuration per stage.}
+    \label{tab:training_config}
+    \begin{tabular}{lcc}
+        \hline
+        \textbf{Parameter} & \textbf{1v0} & \textbf{1v1} \\
+        \hline
+        Observation dims       & 24             & 30 \\
+        Curriculum phases      & 8 (0--7)       & 4 (warmup--phase3) \\
+        Promotion threshold    & 40\% / 30 eps  & 60\% / 10 eps \\
+        Demotion threshold     & 10\% / 30 eps  & --- \\
+        Max steps/episode      & 350--1250      & 1000 \\
+        Simulation step        & \SI{40}{ms}    & \SI{40}{ms} \\
+        Robot types trained    & Viper + Titan  & Viper + Titan (alternating) \\
+        Opponent               & None           & Static $\Rightarrow$ scripted $\Rightarrow$ frozen \\
+        \hline
+    \end{tabular}
+\end{table}
+
+\subsection{Evaluation Protocol}
+Trained policies were assessed through repeated episodes under \emph{fixed}
+curriculum conditions: the curriculum was frozen during evaluation so the
+difficulty could not drift, and deterministic action selection was used. For the
+1v0 stage we additionally evaluate per phase (sweeping phases 0--7) and against a
+random-action agent as a baseline. The 1v1 stage is evaluated as Viper-versus-Titan
+matches reporting wins, losses, and draws. Per-episode metrics are aggregated as
+mean and standard deviation.
+
+\subsection{Performance Metrics}
+We collect: episode reward; \textbf{goal rate}; \textbf{own-goal} and
+\textbf{ball-out} rates; \textbf{timeout rate} (episodes that exhaust the step
+budget without a terminal event); time-to-score; and final ball-to-goal distance.
+For 1v1 we additionally track opponent goal rate and the win/draw outcome.
+
+\section{Results and Discussion} \label{sec:results}
+We report results as measured within the available training budget, including a
+degenerate behaviour that is presented as a finding because it directly motivates
+the reward-design discussion.
+
+\subsection{Learning Performance}
+Fig.~\ref{fig:training_curves} shows the training monitor for both robots
+(accumulated reward and episode duration over training steps), and
+Fig.~\ref{fig:learning_curve} the per-episode learning curve for Viper. Early
+phases confirm the curriculum's effectiveness: with the ball placed a few
+centimetres from the goal, the agent scores immediately and is exposed to the
+$+300$ terminal signal within the first episodes, giving PPO a strong initial
+gradient. As the curriculum advances to harder phases the mean reward remains high
+and stable (Viper $\approx$208, Titan $\approx$184; best Viper episode $565$), yet
+the episode duration stays long ($\approx$729 steps for Viper and $\approx$767 for
+Titan) — most episodes reach the step budget without scoring. Correspondingly, the
+per-episode goal rate in Fig.~\ref{fig:learning_curve} \emph{falls} from roughly
+$80\%$ in the trivial phases to $20$--$30\%$ and does not recover. Critically,
+reward stays high while goals decline: this gap is the quantitative signature of
+reward shaping being optimised without the terminal objective being achieved, and
+it appears for both embodiments — confirming that the bottleneck is the reward
+balance rather than a specific robot.
+
+% FIG.3 - imagem anexada: monitor de treino (Viper topo / Titan base)
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/monitor_training.png}
+    \caption{Training monitor for Viper (top) and Titan (bottom): accumulated
+    episode reward (shaping) and episode duration over training steps. Reward
+    stabilises (Viper $\approx$208, Titan $\approx$184) while episodes stay long
+    ($\approx$729 and $\approx$767 steps) and goals remain rare — the agents
+    optimise the dense shaping without reliably finishing.}
+    \label{fig:training_curves}
+\end{figure}
+
+% FIG.4 - imagem anexada: curva por episodio (PROVA do reward hacking)
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/learning_curve.png}
+    \caption{Viper per-episode results: reward and moving average (left), sample
+    efficiency over total timesteps (centre), and goal rate (right). The reward
+    plateaus while the goal rate decays — evidence of a reward-shaping local
+    optimum.}
+    \label{fig:learning_curve}
+\end{figure}
+
+\subsection{Goal Scoring Performance}
+Table~\ref{tab:eval1v0} reports a deterministic 1v0 evaluation with the curriculum
+frozen. The agent never concedes own-goals and never sends the ball out, but a
+majority of episodes end in timeout: the ball is consistently brought close to the
+goal (mean final ball-to-goal distance $0.283 \pm 0.120\,\mathrm{m}$) yet not
+driven across the line. The high reward standard deviation ($134.05 \pm 139.46$)
+reflects a bimodal outcome — episodes either score (best $+320.77$ in 55 steps) or
+time out — rather than gradual performance.
+
+\begin{table}[h]
+    \centering
+    \caption{1v0 deterministic evaluation (fixed curriculum phase).}
+    \label{tab:eval1v0}
+    \begin{tabular}{lc}
+        \hline
+        \textbf{Metric} & \textbf{Value} \\
+        \hline
+        Goal rate            & $37.5\%$ (3/8) \\
+        Timeout rate         & $62.5\%$ (5/8) \\
+        Own-goal rate        & $0.0\%$ \\
+        Ball-out rate        & $0.0\%$ \\
+        Mean episode reward  & $134.05 \pm 139.46$ \\
+        Mean episode length  & $189.6 \pm 93.4$ steps \\
+        Mean final ball-to-goal dist. & $0.283 \pm 0.120$ m \\
+        Fastest goal         & $55$ steps ($R = +320.77$) \\
+        \hline
+    \end{tabular}
+\end{table}
+
+\subsection{Ball Control Behaviour and the Park-Near-Post Failure Mode}
+Qualitative inspection of the deterministic rollouts reveals the cause of the
+timeouts: the policy frequently navigates to a fixed point near a goal post and
+stalls there instead of completing the shot. This is a local
+optimum of the dense reward — the post-relative observation features and the
+alignment term make a near-goal static position locally acceptable, while the
+anti-stall penalties ($-0.10$/step motionless, $-0.30$/step post-stuck) are too
+small to overcome it and the time penalty ($-0.003$) is negligible. The $0\%$
+ball-out and own-goal rates indicate a conservative policy that does not lose the
+ball but is under-aggressive at finishing.
+
+\subsection{Titan vs Viper Analysis}
+Both morphologies were trained with the same shared policy conditioned on
+\texttt{type\_id}, confirming that a robot-local observation design generalises
+across platforms with different mass, geometry and speed: Titan, despite its lower
+top speed and greater mass, follows the same qualitative learning trajectory as
+Viper. The faster Viper reaches scoring positions in fewer steps, whereas Titan
+requires longer trajectories to position behind the ball, which under a fixed step
+budget reduces its scoring opportunities. Both platforms exhibit the same finishing
+limitation.
+
+\subsection{1v1 Adversarial Performance}
+The 1v1 policy was initialised from the 1v0 weights and fine-tuned through the
+four-phase pipeline. Over 20 evaluation episodes in the self-play phase, all
+matches ended in draws after the full 1000-step horizon, with neither robot
+scoring. This is consistent with the 1v0 finishing weakness compounded by the
+opponent obstructing the goal mouth: transferring an under-finishing base policy
+into a harder adversarial task produced mutual stalling rather than scoring.
+
+\subsection{Key Design Decisions}
+Three decisions were critical to reaching the behaviour reported above.
+\emph{(i)~No CNN on LiDAR:} an earlier version processed 360 LiDAR rays with a 1D
+CNN and never scored after 611k steps because the contact bonus dominated and the
+agent learned to hover; the current policy uses only analytical GPS-derived
+features. \emph{(ii)~$\max(0,\Delta)$ progress clamp:} without it, pushing the ball
+the wrong way is penalised and the rational policy avoids the ball; with it, any
+contact is neutral or positive. \emph{(iii)~Goal-mouth clamped target:} the
+ball-to-goal distance uses the nearest point inside the goal mouth, preventing the
+degenerate strategy of always pushing toward $x=0$.
+
+\section{Conclusions and Future Work} \label{sec:conclusion}
+We presented a two-stage DRL pipeline for 1v1 robot soccer with heterogeneous
+omni-directional robots in Webots, using PPO, a shared morphology-conditioned
+policy, embedded inverse kinematics, a local-frame observation design, and a
+competency-based curriculum. The pipeline produces locomotion and short/medium-range
+scoring in 1v0 and a complete 1v1 framework with weight surgery and scripted /
+frozen-policy opponents. The main negative finding is a finishing limitation: the
+policy brings the ball near the goal and then stalls close to a post, a local
+optimum of the dense reward that the current anti-stall penalties do not overcome.
+Consequently the honest fixed-phase 1v0 goal rate is $37.5\%$ (with $0\%$
+own-goals/ball-outs and $62.5\%$ timeouts), and 1v1 matches end in draws. We
+attribute this to the balance of the reward shaping and the limited training
+budget, both acknowledged project constraints.
+
+Future work will: (i)~re-balance the reward with an explicit anti-park penalty and
+a finishing bonus proportional to ball speed across the goal line; (ii)~train
+substantially longer with the now-unblocked curriculum; (iii)~adopt true
+simultaneous self-play in 1v1; and (iv)~explore dynamic-ball interception and a 2v2
+extension with inter-agent communication, as well as a comparison of PPO against
+SAC and DDPG on the same environment.
+
+\section*{Acknowledgment}
+The authors thank the teaching team of \emph{Topics in Intelligent Robotics}
+(M.IA) at the Faculty of Engineering of the University of Porto (FEUP) for guidance
+and feedback throughout this project.
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+\end{document}

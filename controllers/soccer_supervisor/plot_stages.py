@@ -61,23 +61,24 @@ def main() -> None:
     last_t = 0
     per_robot = defaultdict(list)       # robot -> [0/1, ...] (gols, para o resumo)
     per_robot_len = defaultdict(list)   # robot -> [length, ...] (p/ estimar fase)
-    with open(args.csv, newline="") as f:
-        for row in csv.DictReader(f):
-            try:
-                st = int(float(row["stage"]))
-                rw = float(row["reward"])
-                gl = int(float(row["goal"]))
-                rb = row["robot"]
-                ln = float(row["length"])
-                last_t = max(last_t, int(float(row["timestep"])))
-            except (KeyError, ValueError):
-                continue
-            rewards[st].append(rw)
-            goals[st].append(gl)
-            robots[st][rb] += 1
-            per_robot[rb].append(gl)
-            per_robot_len[rb].append(ln)
-            n_eps += 1
+    # Lê tolerando bytes NUL (CSV pode estar sendo escrito durante o treino).
+    _text = open(args.csv, "r", errors="replace").read().replace("\x00", "")
+    for row in csv.DictReader(_text.splitlines()):
+        try:
+            st = int(float(row["stage"]))
+            rw = float(row["reward"])
+            gl = int(float(row["goal"]))
+            rb = row["robot"]
+            ln = float(row["length"])
+            last_t = max(last_t, int(float(row["timestep"])))
+        except (KeyError, ValueError):
+            continue
+        rewards[st].append(rw)
+        goals[st].append(gl)
+        robots[st][rb] += 1
+        per_robot[rb].append(gl)
+        per_robot_len[rb].append(ln)
+        n_eps += 1
 
     if not n_eps:
         raise SystemExit("CSV vazio — nenhum episódio ainda.")
