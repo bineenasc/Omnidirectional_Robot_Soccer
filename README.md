@@ -22,18 +22,19 @@ fine-tunes the policy against an opponent.
 ## Table of Contents
 
 1. [Authors](#authors)
-2. [Problem Formulation](#problem-formulation)
-3. [System Architecture](#system-architecture)
-4. [Requirements & Installation](#requirements--installation)
-5. [Project Layout](#project-layout)
-6. [How to Run](#how-to-run)
-7. [Method](#method)
-8. [Reproducibility](#reproducibility)
-9. [Results](#results)
-10. [Discussion: the "park-near-post" failure mode](#discussion-the-park-near-post-failure-mode)
-11. [Limitations & Future Work](#limitations--future-work)
-12. [References](#references)
-13. [License](#license)
+2. [Submission Notes (assignment checklist)](#submission-notes-assignment-checklist)
+3. [Problem Formulation](#problem-formulation)
+4. [System Architecture](#system-architecture)
+5. [Requirements & Installation](#requirements--installation)
+6. [Project Layout](#project-layout)
+7. [How to Run](#how-to-run)
+8. [Method](#method)
+9. [Reproducibility](#reproducibility)
+10. [Results](#results)
+11. [Discussion: the "park-near-post" failure mode](#discussion-the-park-near-post-failure-mode)
+12. [Limitations & Future Work](#limitations--future-work)
+13. [References](#references)
+14. [License](#license)
 
 ---
 
@@ -48,6 +49,27 @@ fine-tunes the policy against an opponent.
 
 Repository: `https://github.com/bineenasc/Omnidirectional_Robot_Soccer` (private; access shared
 with `asousa@fe.up.pt`).
+
+---
+
+## Submission Notes (assignment checklist)
+
+Direct mapping of each required item to where it is addressed in this submission.
+
+| Required item | Status / location |
+|---|---|
+| **Operating system** | Windows 10/11 (developed on); also Linux / macOS — see [Requirements](#requirements--installation) |
+| **ROS version / packages** | **Not applicable.** This project does **not** use ROS. It runs on Webots R2025a + Python + Stable-Baselines3 (no ROS nodes, packages, or catkin/colcon workspace) |
+| **Dependencies** | `requirements.txt` (gymnasium, stable-baselines3, torch, numpy, matplotlib, pandas) — see [Requirements](#requirements--installation) |
+| **Indication of source code** | All sources under `controllers/`, `protos/`, `worlds/`; entry points indicated in [Project Layout](#project-layout) |
+| **Directory organization** | See [Project Layout](#project-layout) |
+| **Makefile** | **Not applicable** — pure Python; no compilation step. Install with `pip install -r requirements.txt` |
+| **Executable** | **Not applicable** — there is no standalone binary. Controllers are Python scripts launched automatically by Webots when a world is opened (see [How to Run](#how-to-run)) |
+| **How to test the code** | See [How to Run](#how-to-run) (train / evaluate / plot) and [Reproducibility](#reproducibility) |
+| **Authors** | See [Authors](#authors) |
+| **Course / programme** | *Topics in Intelligent Robotics*, M.IA, 2025/2026 |
+| **Institution (FEUP)** | Faculty of Engineering, University of Porto (FEUP) |
+| **Source-code repository** | Private GitHub repo above; access shared with `asousa@fe.up.pt` |
 
 ---
 
