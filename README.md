@@ -198,7 +198,8 @@ Viper-vs-Titan matches and reports wins/draws.
 ### Observation space
 
 24-D in 1v0 (30-D in 1v1), all directions rotated into the robot's local frame via
-$\theta = \operatorname{atan2}(-m_1, m_0)$ so that a positive local-$z$ component means "ahead".
+`theta = atan2(-m1, m0)` (yaw from the orientation matrix), so that a positive local-z
+component means "ahead".
 
 | Index | Feature | Range |
 |---|---|---|
