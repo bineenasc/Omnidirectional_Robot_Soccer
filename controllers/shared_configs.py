@@ -14,7 +14,7 @@ import sys
 # ── Simulation mode ───────────────────────────────────────────────────────────
 # "train" → executa train.py (treino PPO)
 # "eval"  → executa model_evaluate() com o modelo treinado
-MODE = "train"
+MODE = "eval"
 
 # ── Robot configurations ──────────────────────────────────────────────────────
 # Keys must match the Webots robot name (robot.getName() in a controller, or

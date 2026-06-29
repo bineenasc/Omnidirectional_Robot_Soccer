@@ -41,9 +41,31 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, ".."))   # for shared_configs
  
 _CKPT_DIR = os.path.join(_HERE, "checkpoints")
-MODEL_PATH = os.path.join(_CKPT_DIR, "final_model.zip")
-N_EPISODES = 10
+MODEL_PATH = os.path.join(_CKPT_DIR, "final_model_viper")
+N_EPISODES = 20
 DETERMINISTIC = True # False = stochastic actions (more variety in eval)
+
+# [FIX] Fase do currículo onde se avalia.
+#   7  = spawn totalmente aleatório / campo todo  → métrica HONESTA de skill.
+#   0  = bola colada ao gol (trivial)             → o eval antigo media isto.
+# Defina EVAL_PHASE = None para varrer todas as fases (0..7) — recomendado.
+EVAL_PHASE: int | None = None   # None → sweep 0..7
+
+# Avaliar também um agente aleatório como baseline (exigido no documento).
+RUN_RANDOM_BASELINE = True
+
+# Episódios por fase durante o sweep (mantém baixo: eval pode correr em FAST).
+SWEEP_EPISODES_PER_PHASE = 8
+
+# FAST = mede rápido (recomendado para métrica). False = real-time (ver o jogo).
+EVAL_FAST = True
+
+# [COMPARA] Comparar o modelo atual vs o backup pré-warm-start, numa só corrida.
+# Põe COMPARE_WITH_BACKUP = True e MODE = "eval" → imprime tabela lado-a-lado
+# nas fases COMPARE_PHASES, e escolhes o melhor para o artigo/vídeo.
+COMPARE_WITH_BACKUP = False
+COMPARE_PHASES      = [0, 3, 7]
+COMPARE_EPISODES    = 8
 
 
 
@@ -63,121 +85,166 @@ def _find_vecnorm(model_path: str) -> str | None:
 
 # --- EVAL --- #
 
-def model_evaluate(
-        model_path: str, 
-        n_episodes: int, 
-        deterministic: bool
-    ) -> list[dict]:
+def _summarise(results: list[dict], n_episodes: int, label: str = "") -> dict:
+    """Print and return aggregate metrics for a list of per-episode results."""
+    rewards = np.array([r["reward"] for r in results])
+    steps   = np.array([r["steps"] for r in results])
+    dists   = np.array([r["dist_to_goal"] for r in results])
+    n_goals     = sum(r["goal_scored"] for r in results)
+    n_own_goals = sum(r["own_goal"] for r in results)
+    n_ball_out  = sum(r["ball_out"] for r in results)
+    n_timeout   = sum(r["timeout"] for r in results)
 
-    # returns list of dicts, one per episode, with restlts
-    # prints global avg and std of metrics --- performance of a singular model
+    if label:
+        print(f"\n=== {label} ===")
+    print(f"Avg reward: {rewards.mean():.2f} ± {rewards.std():.2f}")
+    print(f"Avg steps: {steps.mean():.1f} ± {steps.std():.1f}")
+    print(f"Avg final dist to goal: {dists.mean():.3f} ± {dists.std():.3f} m")
+    print(f"Goal rate:      {n_goals}/{n_episodes} = {n_goals/n_episodes:.1%}")
+    print(f"Own-goal rate:  {n_own_goals}/{n_episodes} = {n_own_goals/n_episodes:.1%}")
+    print(f"Ball-out rate:  {n_ball_out}/{n_episodes} = {n_ball_out/n_episodes:.1%}")
+    print(f"Timeout rate:   {n_timeout}/{n_episodes} = {n_timeout/n_episodes:.1%}")
+    return dict(
+        goal_rate     = n_goals / n_episodes,
+        own_goal_rate = n_own_goals / n_episodes,
+        ball_out_rate = n_ball_out / n_episodes,
+        timeout_rate  = n_timeout / n_episodes,
+        reward_mean   = float(rewards.mean()),
+        dist_mean     = float(dists.mean()),
+    )
+
+
+def model_evaluate(
+        model_path: str,
+        n_episodes: int,
+        deterministic: bool,
+        eval_phase: int | None = None,
+        random_agent: bool = False,
+    ) -> list[dict]:
+    """
+    Evaluate one model (or a random agent) on a FIXED curriculum phase.
+
+    eval_phase: 0..7 to lock difficulty (7 = full-field random spawn = honest
+                skill measure).  None falls back to the env's default (phase 0).
+    random_agent: if True, ignore the model and sample uniform random actions
+                  (baseline required by the project's objectives doc).
+    """
 
     GOAL_Z = FIELD["goal_z_attack"]
 
-    # load model
-    print(f"Model: {model_path}")
-    print(f"Episodes: {n_episodes}  |  Deterministic: {deterministic}")
+    who = "RANDOM AGENT (baseline)" if random_agent else model_path
+    print(f"Model: {who}")
+    print(f"Episodes: {n_episodes}  |  Deterministic: {deterministic}"
+          f"  |  Phase: {eval_phase if eval_phase is not None else 'env-default'}")
     print(f"{'─'*51}\n")
- 
-    #model = PPO.load(model_path, env=env)    # still deciding wher to load model
 
     env_raw  = SoccerEnv()
-    # Run at real-time speed so the 3D view is smooth (not a flickering fast-sim).
-    env_raw.simulationSetMode(env_raw.SIMULATION_MODE_REAL_TIME)
+    # FAST → métrica rápida.  REAL_TIME → visualização suave do jogo.
+    if EVAL_FAST:
+        env_raw.simulationSetMode(env_raw.SIMULATION_MODE_FAST)
+    else:
+        env_raw.simulationSetMode(env_raw.SIMULATION_MODE_REAL_TIME)
+    # [FIX] Lock the difficulty so the curriculum can't drift during eval.
+    env_raw.freeze_curriculum(True)
     env_mon  = Monitor(env_raw)
     vec_env  = DummyVecEnv([lambda: env_mon])
 
-    vecnorm_path = _find_vecnorm(model_path)
-    if vecnorm_path:
-        print(f" VecNorm: {vecnorm_path}")
-        vec_env = VecNormalize.load(vecnorm_path, vec_env)
-        vec_env.training = False   # freeze running stats during eval
-        vec_env.norm_reward = False   # return raw rewards for reporting
+    model = None
+    if not random_agent:
+        vecnorm_path = _find_vecnorm(model_path)
+        if vecnorm_path:
+            print(f" VecNorm: {vecnorm_path}")
+            vec_env = VecNormalize.load(vecnorm_path, vec_env)
+            vec_env.training = False   # freeze running stats during eval
+            vec_env.norm_reward = False   # return raw rewards for reporting
+        else:
+            print(" VecNorm: not found — rewards will be raw (unnormalised)")
+            vec_env = VecNormalize(
+                vec_env, norm_obs=False, norm_reward=False, gamma=0.99,
+            )
+        model = PPO.load(model_path, env=vec_env)
     else:
-        print(" VecNorm: not found — rewards will be raw (unnormalised)")
         vec_env = VecNormalize(
-            vec_env,
-            norm_obs = False,
-            norm_reward = False,
-            gamma = 0.99,
+            vec_env, norm_obs=False, norm_reward=False, gamma=0.99,
         )
-
-    model = PPO.load(model_path, env=vec_env)
-    # ----------§---------- #
 
     results = []
 
     for ep in range(n_episodes):
-        #model = PPO.load(model_path, env=vec_env) # load model inside loop to reset any VecNormalize stats if used during training
+        # [FIX] Force the requested phase BEFORE each reset.
+        if eval_phase is not None:
+            env_raw.set_phase(eval_phase)
 
-        obs, _  = vec_env.reset() # if model load inside, comment this line
+        obs = vec_env.reset()
         ep_reward = 0.0
         ep_steps = 0
         done = False
         last_info = {}
 
-        # run sim and get in episode metrics
         while not done:
-            action, _ = model.predict(obs, deterministic=deterministic)
+            if random_agent:
+                action = np.array([env_raw.action_space.sample()])
+            else:
+                action, _ = model.predict(obs, deterministic=deterministic)
             obs, reward, dones, infos = vec_env.step(action)
             ep_reward += float(reward[0])
             ep_steps += 1
             last_info = infos[0]
             done = bool(dones[0])
 
-
         # final ball dist to goal (read directly from the Webots node)
         ball_p = env_raw._ball_node.getPosition()
         ball_x = ball_p[0]
         ball_z = ball_p[2]
-        dist_to_goal= math.hypot(ball_x, ball_z - GOAL_Z)
+        dist_to_goal = math.hypot(ball_x, ball_z - GOAL_Z)
 
+        goal     = bool(last_info.get("goal_scored", False))
+        own_goal = bool(last_info.get("own_goal", False))
+        ball_out = bool(last_info.get("ball_out", False))
+        timeout  = not (goal or own_goal or ball_out)   # [FIX] ran out of steps
 
-        # --- metrics in episode --- #
         results.append(
             dict(
-                ep = ep + 1,
-                reward = ep_reward,
-                steps = ep_steps,
-                goal_scored = last_info.get("goal_scored", False),
-                own_goal = last_info.get("own_goal", False),
-                ball_out = last_info.get("ball_out", False),
-                dist_to_goal = dist_to_goal,
-                ball_x = ball_x,
-                ball_z = ball_z,
+                ep = ep + 1, reward = ep_reward, steps = ep_steps,
+                goal_scored = goal, own_goal = own_goal, ball_out = ball_out,
+                timeout = timeout, dist_to_goal = dist_to_goal,
+                ball_x = ball_x, ball_z = ball_z,
             )
         )
 
-        print(
-            f"Episode {ep + 1:>2} | "
-            f"R={ep_reward:+8.2f}  steps={ep_steps:>4}"
-            f"dist_to_goal={dist_to_goal:.3f} m\n"
-            f"{'─'*51}\n"
-        )
+        tag = ("GOAL" if goal else "OWN-GOAL" if own_goal
+               else "OUT" if ball_out else "timeout")
+        print(f"Episode {ep + 1:>2} | R={ep_reward:+8.2f}  steps={ep_steps:>4}"
+              f"  dist={dist_to_goal:.3f} m  [{tag}]")
 
     vec_env.close()
-
-
-    # ------------------------------ #
-    # --- avg of episode metrics --- #
-    # ------------------------------ #
-
-    rewards = np.array([r["reward"] for r in results])
-    steps = np.array([r["steps"] for r in results])
-    dists = np.array([r["dist_to_goal"] for r in results])
-    n_goals = sum(r["goal_scored"] for r in results)
-    n_own_goals = sum(r["own_goal"] for r in results)
-    n_ball_out = sum(r["ball_out"] for r in results)
-
-    print(f"Avg reward: {rewards.mean():.2f} ± {rewards.std():.2f}")
-    print(f"Avg steps: {steps.mean():.1f} ± {steps.std():.1f}")
-    print(f"Avg final dist to goal: {dists.mean():.3f} ± {dists.std():.3f} m")
-    print(f"Goal rate: {n_goals}/{n_episodes} = {n_goals/n_episodes:.1%}")
-    print(f"Own-goal rate: {n_own_goals}/{n_episodes} = {n_own_goals/n_episodes:.1%}")
-    print(f"Ball-out rate: {n_ball_out}/{n_episodes} = {n_ball_out/n_episodes:.1%}")
-
-
+    _summarise(results, n_episodes)
     return results
+
+
+def evaluate_phase_sweep(
+        model_path: str,
+        episodes_per_phase: int,
+        deterministic: bool,
+    ) -> None:
+    """Evaluate the model on each curriculum phase 0..7 and print a table."""
+    rows = []
+    for ph in range(8):
+        print(f"\n{'='*60}\n PHASE {ph}\n{'='*60}")
+        res = model_evaluate(model_path, episodes_per_phase, deterministic,
+                             eval_phase=ph)
+        s = _summarise(res, episodes_per_phase, label=f"Phase {ph} summary")
+        rows.append((ph, s))
+
+    print(f"\n{'='*60}\n SWEEP SUMMARY — {Path(model_path).stem}\n{'='*60}")
+    print(f"{'phase':>5} | {'goal%':>6} | {'own%':>5} | {'out%':>5} | "
+          f"{'timeout%':>8} | {'dist(m)':>7}")
+    for ph, s in rows:
+        print(f"{ph:>5} | {s['goal_rate']*100:>5.0f}% | "
+              f"{s['own_goal_rate']*100:>4.0f}% | {s['ball_out_rate']*100:>4.0f}% | "
+              f"{s['timeout_rate']*100:>7.0f}% | {s['dist_mean']:>7.3f}")
+    overall = np.mean([s['goal_rate'] for _, s in rows])
+    print(f"\nMean goal rate across phases: {overall:.1%}")
 
 def model_compare(
         list_of_model_paths: list[str], 
@@ -273,6 +340,63 @@ def model_compare(
 
 
 
+def compare_current_vs_backup(robot: str = "viper") -> None:
+    """Evaluate current final_model vs backup_1v0 model on the same fixed phases.
+
+    Prints a side-by-side goal-rate table so you can pick the stronger model
+    for the article/video.  Runs in a single Webots session.
+    """
+    current = os.path.join(_CKPT_DIR, f"final_model_{robot}")
+    backup  = os.path.join(_CKPT_DIR, "backup_1v0", f"final_model_{robot}")
+    models  = [("current (warm-start)", current)]
+    if os.path.isfile(backup + ".zip"):
+        models.append(("backup (pre-warm-start)", backup))
+    else:
+        print(f"[compare] backup not found at {backup}.zip — só avalio o atual.")
+
+    table = {}   # (label, phase) -> goal_rate
+    for label, path in models:
+        for ph in COMPARE_PHASES:
+            print(f"\n{'='*60}\n {label}  |  PHASE {ph}\n{'='*60}")
+            res = model_evaluate(path, COMPARE_EPISODES, DETERMINISTIC,
+                                 eval_phase=ph)
+            s = _summarise(res, COMPARE_EPISODES, label=f"{label} · phase {ph}")
+            table[(label, ph)] = s["goal_rate"]
+
+    print(f"\n{'='*60}\n COMPARISON — goal rate by phase ({robot})\n{'='*60}")
+    header = "model".ljust(26) + "".join(f"  ph{p:>2}" for p in COMPARE_PHASES)
+    print(header)
+    for label, _ in models:
+        row = label.ljust(26) + "".join(
+            f"  {table[(label, p)]*100:>3.0f}%" for p in COMPARE_PHASES)
+        print(row)
+
+
+def run_eval(model_path: str = MODEL_PATH) -> None:
+    """Top-level eval used by the Webots supervisor (MODE='eval').
+
+    EVAL_PHASE is None  → sweep all phases 0..7 (honest, full picture).
+    EVAL_PHASE is 0..7  → single fixed phase with N_EPISODES episodes.
+    Then, if RUN_RANDOM_BASELINE, evaluates a random agent on phase 7 for
+    the baseline comparison required by the objectives document.
+    """
+    if COMPARE_WITH_BACKUP:
+        compare_current_vs_backup("viper")
+        return
+    if EVAL_PHASE is None:
+        evaluate_phase_sweep(model_path, SWEEP_EPISODES_PER_PHASE, DETERMINISTIC)
+    else:
+        model_evaluate(model_path, N_EPISODES, DETERMINISTIC,
+                       eval_phase=EVAL_PHASE)
+
+    if RUN_RANDOM_BASELINE:
+        print(f"\n{'='*60}\n RANDOM-AGENT BASELINE (phase 7)\n{'='*60}")
+        res = model_evaluate(model_path, max(10, SWEEP_EPISODES_PER_PHASE),
+                             DETERMINISTIC, eval_phase=7, random_agent=True)
+        _summarise(res, max(10, SWEEP_EPISODES_PER_PHASE),
+                   label="Random baseline (phase 7)")
+
+
 # --- CLI --- #
 def _cli() -> None:
     """Parse CLI args and run evaluation."""
@@ -304,4 +428,4 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1].startswith("--"):
         _cli()
     else:
-        model_evaluate(MODEL_PATH, N_EPISODES, DETERMINISTIC)
+        run_eval(MODEL_PATH)

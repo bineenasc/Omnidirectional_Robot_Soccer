@@ -197,9 +197,17 @@ class SoccerEnv(Supervisor, gym.Env):
         self._N_PHASES           : int   = 8
         self._phase              : int   = 0
         self._MAX_STEPS_BY_PHASE : list  = [350, 500, 650, 800, 950, 1100, 1200, 1250]
-        self._GOAL_WINDOW        : int   = 40   # episódios na janela de avaliação
-        self._PROMOTE_THRESH     : float = 0.50 # taxa de gols p/ promover
-        self._goal_history       : deque = deque(maxlen=40)
+        self._GOAL_WINDOW        : int   = 30   # episódios na janela de avaliação
+        # [FIX] threshold 0.50 era inalcançável (agente saturava ~28% nas fases
+        # iniciais) → currículo travava. 0.40 destrava a progressão mantendo
+        # exigência razoável de competência antes de promover.
+        self._PROMOTE_THRESH     : float = 0.40 # taxa de gols p/ promover
+        # [FIX] demoção: se o agente desaba numa fase nova (não consolidou),
+        # volta uma fase em vez de ficar preso eternamente com reward baixo.
+        self._DEMOTE_THRESH      : float = 0.10
+        # [FIX] trava o currículo durante o eval (mede numa fase fixa).
+        self._freeze_curriculum  : bool  = False
+        self._goal_history       : deque = deque(maxlen=30)
 
         # Contador mantido p/ compatibilidade e diagnóstico em train.py
         self._curriculum_step : int = 0
@@ -404,16 +412,25 @@ class SoccerEnv(Supervisor, gym.Env):
         self._prev_ball_z     = ball_pos[1]
         self._curriculum_step += 1
 
-        # ── Curriculum por competência: promoção de fase ───────────────────
-        if terminated or truncated:
+        # ── Curriculum por competência: promoção / demoção de fase ─────────
+        # Congelado durante o eval para medir numa fase fixa.
+        if (terminated or truncated) and not self._freeze_curriculum:
             self._goal_history.append(1 if events["goal_scored"] else 0)
-            if (len(self._goal_history) >= self._GOAL_WINDOW
-                    and self._phase < self._N_PHASES - 1):
+            if len(self._goal_history) >= self._GOAL_WINDOW:
                 goal_rate = sum(self._goal_history) / len(self._goal_history)
-                if goal_rate >= self._PROMOTE_THRESH:
+                # Promoção: domina a fase atual → avança.
+                if (goal_rate >= self._PROMOTE_THRESH
+                        and self._phase < self._N_PHASES - 1):
                     self._phase += 1
                     self._goal_history.clear()
                     print(f"[Curriculum] >>> PROMOVIDO para a fase "
+                          f"{self._phase}/{self._N_PHASES - 1} "
+                          f"(goal_rate={goal_rate:.0%}, robot={self._active_robot})")
+                # Demoção: desabou numa fase difícil → recua p/ reconsolidar.
+                elif goal_rate < self._DEMOTE_THRESH and self._phase > 0:
+                    self._phase -= 1
+                    self._goal_history.clear()
+                    print(f"[Curriculum] <<< DEMOVIDO para a fase "
                           f"{self._phase}/{self._N_PHASES - 1} "
                           f"(goal_rate={goal_rate:.0%}, robot={self._active_robot})")
 
@@ -730,6 +747,15 @@ class SoccerEnv(Supervisor, gym.Env):
     # Robot hot-swap (used by train.py for epoch alternation — Step 8)
     # ══════════════════════════════════════════════════════════════════════════
 
+    def set_phase(self, phase: int) -> None:
+        """Force the curriculum phase (used by eval to test a fixed difficulty)."""
+        self._phase = int(np.clip(phase, 0, self._N_PHASES - 1))
+        self._goal_history.clear()
+
+    def freeze_curriculum(self, frozen: bool = True) -> None:
+        """Disable automatic phase promotion/demotion (used during eval)."""
+        self._freeze_curriculum = bool(frozen)
+
     def set_robot_type(self, robot_name: str) -> None:
         """Update the active robot label (type_id in obs) without a physical swap."""
         if robot_name not in ROBOT_CONFIGS:
@@ -860,11 +886,10 @@ def _alignment_bonus(
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     from train import train
-    from eval import model_evaluate
-
-    env = SoccerEnv()
+    from eval import run_eval, MODEL_PATH
 
     if MODE == "train":
+        env = SoccerEnv()
         train(env)
     else:
-        model_evaluate(env)
+        run_eval(MODEL_PATH)

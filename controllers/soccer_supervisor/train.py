@@ -36,9 +36,16 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
-N_EPOCHS        = 13              # epochs per robot (13 Viper + 13 Titan = 26 total)
-STEPS_PER_EPOCH = 120_000         # steps per epoch — 120k gives each robot time to stabilise
+N_EPOCHS        = 8               # epochs per robot — com warm-start 8 bastam p/ refinar
+STEPS_PER_EPOCH = 100_000         # steps per epoch (~25 min cada → cabe num dia)
 ROBOT_SEQUENCE  = ["viper", "titan"]
+
+# [FIX-RESULTADO-HOJE] Continuar a partir do final_model_<robot>.zip existente
+# em vez de recomeçar do zero. Os modelos já dominam as fases fáceis (60% no
+# eval trivial); com o currículo destravado eles avançam para fases difíceis
+# muito mais rápido do que treinar de novo do zero (poupa ~11 h).
+# Coloque False para treinar de raiz.
+CONTINUE_FROM_FINAL = True
 
 # [CRITICO-2 fix] Rede simétrica — value function aprende melhor
 POLICY_KWARGS: dict = dict(
@@ -52,8 +59,11 @@ def _lr_schedule(progress_remaining: float) -> float:
 
 PPO_KWARGS: dict = dict(
     policy        = "MlpPolicy",
-    n_steps       = 1000,         # [CRITICO-1 fix] alinhado com _max_steps=1000 do env
-    batch_size    = 250,          # [MEDIO-2 fix] era 64; 250 = n_steps/4
+    # [FIX] era 1000 (= 1 episódio). 2048 (default SB3) recolhe vários episódios
+    # por update → estimativas de vantagem (GAE) muito mais estáveis. Como o
+    # _max_steps varia 350–1250 por fase, alinhar n_steps a 1 episódio era frágil.
+    n_steps       = 2048,
+    batch_size    = 256,          # 2048 / 256 = 8 minibatches por época
     n_epochs      = 10,
     gamma         = 0.99,
     gae_lambda    = 0.95,
@@ -117,6 +127,7 @@ def train(env_raw) -> None:
     for d in (_CKPT_DIR, _LOG_DIR, _PLOT_DIR):
         os.makedirs(d, exist_ok=True)
     _init_episode_csv(EPISODE_CSV)
+    _backup_existing_finals()  # protege os modelos já treinados antes de continuar
 
     # Train Viper first (already in world at startup)
     print("\n" + "═" * 60)
@@ -141,6 +152,24 @@ def train(env_raw) -> None:
     print("\n[train] All robots trained. Models saved to checkpoints/")
 
 
+def _backup_existing_finals() -> None:
+    """Copy any existing final_model_*.zip/pkl to checkpoints/backup_1v0/ once.
+
+    Warm-start overwrites the final models at the end of each run; this keeps a
+    pristine copy of the originally-trained 1v0 models so they're never lost.
+    """
+    import shutil
+    backup = os.path.join(_CKPT_DIR, "backup_1v0")
+    os.makedirs(backup, exist_ok=True)
+    for robot in ROBOT_SEQUENCE:
+        for suffix in (".zip", "_vecnorm.pkl"):
+            src = os.path.join(_CKPT_DIR, f"final_model_{robot}{suffix}")
+            dst = os.path.join(backup, f"final_model_{robot}{suffix}")
+            if os.path.isfile(src) and not os.path.isfile(dst):
+                shutil.copy2(src, dst)
+                print(f"[backup] {src} → {dst}")
+
+
 def _train_robot(env_raw, robot_name: str, stage0: int = 0) -> PPO:
     """
     Train one robot for N_EPOCHS epochs with its own fresh model and VecNormalize.
@@ -152,20 +181,46 @@ def _train_robot(env_raw, robot_name: str, stage0: int = 0) -> PPO:
     # ── Wrapper stack (fresh for each robot) ─────────────────────────────────
     env     = Monitor(env_raw)
     vec_env = DummyVecEnv([lambda: env])
-    vec_env = VecNormalize(
-        vec_env,
-        norm_obs    = False,
-        norm_reward = True,
-        clip_reward = 50.0,    # [MEDIO fix] era 10.0; 50 preserva sinal do gol (+300)
-        gamma       = PPO_KWARGS["gamma"],
-    )
 
-    model = PPO(
-        env             = vec_env,
-        policy_kwargs   = POLICY_KWARGS,
-        tensorboard_log = log_dir,
-        **PPO_KWARGS,
-    )
+    final_stem    = os.path.join(ckpt_dir, f"final_model_{robot_name}")
+    vecnorm_path  = final_stem + "_vecnorm.pkl"
+    model_path    = final_stem + ".zip"
+    warm_start    = CONTINUE_FROM_FINAL and os.path.isfile(model_path)
+
+    if warm_start and os.path.isfile(vecnorm_path):
+        # Reaproveita as estatísticas de normalização da reward já aprendidas.
+        vec_env = VecNormalize.load(vecnorm_path, vec_env)
+        vec_env.training    = True
+        vec_env.norm_reward = True
+    else:
+        vec_env = VecNormalize(
+            vec_env,
+            norm_obs    = False,
+            norm_reward = True,
+            clip_reward = 50.0,  # [MEDIO fix] era 10.0; 50 preserva sinal do gol (+300)
+            gamma       = PPO_KWARGS["gamma"],
+        )
+
+    if warm_start:
+        print(f"[{robot_name}] WARM-START: a continuar de {model_path}")
+        model = PPO.load(
+            model_path,
+            env             = vec_env,
+            tensorboard_log = log_dir,
+            custom_objects  = {"learning_rate": _lr_schedule,
+                               "lr_schedule":   _lr_schedule,
+                               "n_steps":       PPO_KWARGS["n_steps"],
+                               "batch_size":    PPO_KWARGS["batch_size"],
+                               "ent_coef":      PPO_KWARGS["ent_coef"]},
+        )
+    else:
+        print(f"[{robot_name}] A treinar de raiz (sem warm-start).")
+        model = PPO(
+            env             = vec_env,
+            policy_kwargs   = POLICY_KWARGS,
+            tensorboard_log = log_dir,
+            **PPO_KWARGS,
+        )
 
     epoch_rewards:    list[float] = []
     epoch_goal_rates: list[float] = []
